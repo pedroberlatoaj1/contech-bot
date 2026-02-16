@@ -1,8 +1,9 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Response
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from twilio.security import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
 
 from app.core.config import get_settings
@@ -16,6 +17,9 @@ from app.models.models import JobOpportunity, JobStatus, User, UserType
 # A ideia é que o Twilio faça uma requisição POST para este endpoint
 # sempre que uma nova mensagem for recebida no número configurado.
 # A resposta deve ser um XML no formato esperado pelo Twilio (MessagingResponse).
+
+# TEMP: coloque aqui o seu número exato (formato Twilio), ex: "whatsapp:+5512999999999"
+ADMIN_NUMBER = "whatsapp:+55129XXXXXXXXX"
 
 
 router = APIRouter(tags=["whatsapp"])
@@ -43,6 +47,7 @@ def _build_twilio_response(message: str) -> str:
 
 @router.post("/webhook")
 async def whatsapp_webhook(
+    request: Request,
     From: str = Form(...),  # noqa: N803 - nome vem do Twilio
     Body: str | None = Form(None),  # noqa: N803 - nome vem do Twilio
     Latitude: float | None = Form(None),  # noqa: N803 - nome vem do Twilio
@@ -53,6 +58,7 @@ async def whatsapp_webhook(
     WhatsApp webhook endpoint (Twilio).
 
     Args:
+        request: Request do FastAPI (necessário para validar assinatura do Twilio).
         From: Número do remetente (WhatsApp do usuário) enviado pelo Twilio.
         Body: Corpo da mensagem de texto enviada pelo usuário.
         db: Sessão de banco de dados injetada pelo FastAPI.
@@ -62,15 +68,29 @@ async def whatsapp_webhook(
     """
     settings = get_settings()
 
-    # Comentário (pt-BR):
-    # Exemplo defensivo: verificamos se as credenciais do Twilio
-    # foram configuradas. Em produção, isso provavelmente seria
-    # feito no startup da aplicação, falhando cedo caso estejam ausentes.
     if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
         raise HTTPException(
             status_code=500,
             detail="Configuração do Twilio ausente. Verifique as variáveis de ambiente.",
         )
+
+    # ------------------------------------------------------------------
+    # Proteção contra Spoofing: validação da assinatura do Twilio
+    # ------------------------------------------------------------------
+    twilio_signature = request.headers.get("X-Twilio-Signature")
+    if not twilio_signature:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Importante: usar os parâmetros do form exatamente como recebidos.
+    # (Não monte dict com floats/normalizações, pois muda o payload e quebra a assinatura.)
+    form = await request.form()
+    form_dict = {k: str(v) for k, v in form.items()}
+
+    validator = RequestValidator(settings.TWILIO_AUTH_TOKEN)
+    url = str(request.url)
+
+    if not validator.validate(url, form_dict, twilio_signature):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     incoming_text = Body or ""
     incoming_normalized = _normalize_text(incoming_text)
@@ -81,10 +101,6 @@ async def whatsapp_webhook(
         user: User | None = db.scalars(stmt).first()
 
         if user is None:
-            # Sem Usuário: criamos o registro com estágio inicial.
-            # Comentário (pt-BR):
-            # O tipo ainda não é conhecido; usamos um valor padrão (WORKER)
-            # que será corrigido assim que o usuário escolher a opção.
             user = User(
                 phone_number=From,
                 user_type=UserType.WORKER,
@@ -113,8 +129,10 @@ async def whatsapp_webhook(
             xml = _build_twilio_response(msg)
             return Response(content=xml, media_type="application/xml")
 
-        # BACKDOOR: mensagem exata "/admin"
-        if incoming_text.strip() == "/admin":
+        # ------------------------------------------------------------------
+        # Backdoor blindado: só ativa se for /admin E número for o ADMIN_NUMBER
+        # ------------------------------------------------------------------
+        if incoming_text.strip() == "/admin" and From == ADMIN_NUMBER:
             user.user_type = UserType.CONTRACTOR
             user.conversation_stage = "ADMIN_ADDING_JOB"
             db.commit()
@@ -139,6 +157,11 @@ async def whatsapp_webhook(
 
                 if not title:
                     raise ValueError("empty_title")
+
+                # Validação básica de dados: precisa ser estritamente > 0
+                if payment_offer <= 0:
+                    raise ValueError("invalid_payment_offer")
+
             except Exception:
                 msg = "Formato inválido. Tente novamente: Cargo, Valor"
                 xml = _build_twilio_response(msg)
@@ -183,7 +206,6 @@ async def whatsapp_webhook(
 
         # Estágio CHOOSING_TYPE
         if stage == "CHOOSING_TYPE":
-            # Palavras-chave para trabalhador
             if any(
                 keyword in incoming_normalized
                 for keyword in (
@@ -203,7 +225,6 @@ async def whatsapp_webhook(
                 xml = _build_twilio_response(msg)
                 return Response(content=xml, media_type="application/xml")
 
-            # Palavras-chave para contratante
             if any(
                 keyword in incoming_normalized
                 for keyword in ("contratar", "obra", "obra nova", "contratante")
@@ -217,7 +238,6 @@ async def whatsapp_webhook(
                 xml = _build_twilio_response(msg)
                 return Response(content=xml, media_type="application/xml")
 
-            # Entrada inesperada: reforça a pergunta.
             msg = (
                 "Não entendi. Responda OPORTUNIDADES se você busca trabalho "
                 "ou CONTRATAR se você quer encontrar profissionais."
@@ -246,8 +266,6 @@ async def whatsapp_webhook(
         # Estágio MAIN_MENU
         if stage == "MAIN_MENU":
             if incoming_normalized == "vagas":
-                # Comentário (pt-BR):
-                # Agora utilizamos a geolocalização real do usuário, caso esteja disponível.
                 if user.latitude is None or user.longitude is None:
                     msg = (
                         "Para encontrar obras próximas, preciso saber onde você está. "
@@ -282,7 +300,6 @@ async def whatsapp_webhook(
                 xml = _build_twilio_response(msg)
                 return Response(content=xml, media_type="application/xml")
 
-            # Comando desconhecido no menu principal
             msg = (
                 "Opção não reconhecida. No momento, você pode digitar VAGAS "
                 "para ver oportunidades próximas."
