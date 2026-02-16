@@ -44,7 +44,7 @@ def _build_twilio_response(message: str) -> str:
 @router.post("/webhook")
 async def whatsapp_webhook(
     From: str = Form(...),  # noqa: N803 - nome vem do Twilio
-    Body: str = Form(...),  # noqa: N803 - nome vem do Twilio
+    Body: str | None = Form(None),  # noqa: N803 - nome vem do Twilio
     Latitude: float | None = Form(None),  # noqa: N803 - nome vem do Twilio
     Longitude: float | None = Form(None),  # noqa: N803 - nome vem do Twilio
     db: Session = Depends(get_db),
@@ -269,7 +269,10 @@ async def whatsapp_webhook(
                 )
 
                 if not nearby_jobs:
-                    msg = "Não encontramos vagas próximas no momento. Tente novamente mais tarde."
+                    msg = (
+                        "Não encontramos vagas próximas no momento. "
+                        "Tente novamente mais tarde."
+                    )
                 else:
                     lines: list[str] = ["Encontrei as seguintes vagas próximas a você:"]
                     for job in nearby_jobs:
@@ -307,4 +310,3 @@ async def whatsapp_webhook(
             status_code=500,
             detail="Erro interno ao processar a mensagem do WhatsApp.",
         ) from exc
-
