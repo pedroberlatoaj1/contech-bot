@@ -29,7 +29,6 @@ def _normalize_text(text: str) -> str:
     Transformamos em minúsculas e removemos espaços extras para facilitar
     a comparação de comandos simples como "vagas", "oportunidade", etc.
     """
-
     return text.strip().lower()
 
 
@@ -37,7 +36,6 @@ def _build_twilio_response(message: str) -> str:
     """
     Cria um XML de resposta para o Twilio usando MessagingResponse.
     """
-
     resp = MessagingResponse()
     resp.message(message)
     return str(resp)
@@ -62,7 +60,6 @@ async def whatsapp_webhook(
     Returns:
         XML com a resposta para o usuário, no formato esperado pelo Twilio.
     """
-
     settings = get_settings()
 
     # Comentário (pt-BR):
@@ -112,8 +109,62 @@ async def whatsapp_webhook(
             db.commit()
             db.refresh(user)
 
+            msg = "Localização recebida! Agora digite VAGAS para ver obras ao seu redor."
+            xml = _build_twilio_response(msg)
+            return Response(content=xml, media_type="application/xml")
+
+        # BACKDOOR: mensagem exata "/admin"
+        if incoming_text.strip() == "/admin":
+            user.user_type = UserType.CONTRACTOR
+            user.conversation_stage = "ADMIN_ADDING_JOB"
+            db.commit()
+            db.refresh(user)
+
             msg = (
-                "Localização recebida! Agora digite VAGAS para ver obras ao seu redor."
+                "🛠️ Modo Admin: Para criar uma nova vaga, digite o Cargo e o Valor "
+                "separados por vírgula. Ex: Encanador, 150.00"
+            )
+            xml = _build_twilio_response(msg)
+            return Response(content=xml, media_type="application/xml")
+
+        # Estágio ADMIN_ADDING_JOB
+        if (user.conversation_stage or "").strip() == "ADMIN_ADDING_JOB":
+            try:
+                parts = [p.strip() for p in incoming_text.split(",")]
+                if len(parts) != 2:
+                    raise ValueError("invalid_parts")
+
+                title = parts[0]
+                payment_offer = float(parts[1])
+
+                if not title:
+                    raise ValueError("empty_title")
+            except Exception:
+                msg = "Formato inválido. Tente novamente: Cargo, Valor"
+                xml = _build_twilio_response(msg)
+                return Response(content=xml, media_type="application/xml")
+
+            lat = user.latitude if user.latitude is not None else -23.2237
+            lon = user.longitude if user.longitude is not None else -45.9009
+
+            job = JobOpportunity(
+                title=title,
+                description="Vaga criada via WhatsApp (modo admin).",
+                payment_offer=payment_offer,
+                latitude=lat,
+                longitude=lon,
+                contractor_id=user.id,
+                status=JobStatus.OPEN,
+            )
+
+            db.add(job)
+            user.conversation_stage = "MAIN_MENU"
+            db.commit()
+            db.refresh(user)
+
+            msg = (
+                f"✅ Vaga de {title} cadastrada com sucesso! "
+                "Ela já aparece para os trabalhadores próximos."
             )
             xml = _build_twilio_response(msg)
             return Response(content=xml, media_type="application/xml")
@@ -126,9 +177,7 @@ async def whatsapp_webhook(
             user.conversation_stage = "CHOOSING_TYPE"
             db.commit()
             db.refresh(user)
-            msg = (
-                "Olá novamente! Você busca OPORTUNIDADES ou quer CONTRATAR?"
-            )
+            msg = "Olá novamente! Você busca OPORTUNIDADES ou quer CONTRATAR?"
             xml = _build_twilio_response(msg)
             return Response(content=xml, media_type="application/xml")
 
@@ -137,7 +186,13 @@ async def whatsapp_webhook(
             # Palavras-chave para trabalhador
             if any(
                 keyword in incoming_normalized
-                for keyword in ("oportunidade", "oportunidades", "trabalhar", "vaga", "vagas")
+                for keyword in (
+                    "oportunidade",
+                    "oportunidades",
+                    "trabalhar",
+                    "vaga",
+                    "vagas",
+                )
             ):
                 user.user_type = UserType.WORKER
                 user.conversation_stage = "ASKING_NAME"
@@ -184,10 +239,7 @@ async def whatsapp_webhook(
             db.commit()
             db.refresh(user)
 
-            msg = (
-                "Cadastro concluído! "
-                "Digite VAGAS para ver obras próximas."
-            )
+            msg = "Cadastro concluído! Digite VAGAS para ver obras próximas."
             xml = _build_twilio_response(msg)
             return Response(content=xml, media_type="application/xml")
 
@@ -217,19 +269,11 @@ async def whatsapp_webhook(
                 )
 
                 if not nearby_jobs:
-                    msg = (
-                        "Não encontramos vagas próximas no momento. "
-                        "Tente novamente mais tarde."
-                    )
+                    msg = "Não encontramos vagas próximas no momento. Tente novamente mais tarde."
                 else:
-                    # Monta a lista de vagas em texto simples.
-                    lines: list[str] = [
-                        "Encontrei as seguintes vagas próximas a você:"
-                    ]
+                    lines: list[str] = ["Encontrei as seguintes vagas próximas a você:"]
                     for job in nearby_jobs:
-                        line = f"- {job.title} (R$ {job.payment_offer:.2f})"
-                        lines.append(line)
-
+                        lines.append(f"- {job.title} (R$ {job.payment_offer:.2f})")
                     msg = "\n".join(lines)
 
                 xml = _build_twilio_response(msg)
@@ -247,6 +291,7 @@ async def whatsapp_webhook(
         user.conversation_stage = "CHOOSING_TYPE"
         db.commit()
         db.refresh(user)
+
         msg = (
             "Houve um problema ao entender seu estágio de conversa. "
             "Vamos recomeçar. Você busca OPORTUNIDADES ou quer CONTRATAR?"
@@ -255,13 +300,8 @@ async def whatsapp_webhook(
         return Response(content=xml, media_type="application/xml")
 
     except HTTPException:
-        # Repassa HTTPException sem alterar.
         raise
     except Exception as exc:  # pragma: no cover - defensive guard
-        # Comentário (pt-BR):
-        # Sempre que interagirmos com serviços externos ou banco, devemos tratar
-        # erros de forma explícita. Aqui apenas registramos o erro e devolvemos
-        # um HTTP 500 genérico.
         print("Erro ao processar webhook do WhatsApp:", repr(exc))
         raise HTTPException(
             status_code=500,
