@@ -11,14 +11,17 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from app.core.database import SessionLocal
-from app.models.models import JobOpportunity, JobStatus, User, UserType
+from app.core.database import SessionLocal, engine
+from app.models.models import Base, JobOpportunity, JobStatus, User, UserType
 
 
 def seed_data() -> None:
     """
     Populate the database with initial test data.
     """
+
+    # Garante que as tabelas existam antes de qualquer operação (Postgres/AWS).
+    Base.metadata.create_all(bind=engine)
 
     db = SessionLocal()
     try:
@@ -95,4 +98,3 @@ def seed_data() -> None:
 
 if __name__ == "__main__":
     seed_data()
-

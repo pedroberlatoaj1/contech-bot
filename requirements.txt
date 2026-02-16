@@ -6,3 +6,4 @@ python-dotenv
 twilio
 python-multipart
 gunicorn
+psycopg2-binary
